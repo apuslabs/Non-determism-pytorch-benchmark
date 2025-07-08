@@ -6,12 +6,22 @@ ENV PYTHONHASHSEED=0
 
 WORKDIR /workspace
 
+# Install Python and pip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+# Copy requirements file with exact versions
+COPY requirements.txt .
+
+# Install dependencies from fixed requirements
+RUN python3 -m pip install -r requirements.txt
+
+# Copy the rest of the application
 COPY . .
-
-# Install uv package manager
-RUN apt-get update && apt-get install -y python3 python3-pip curl && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    . $HOME/.local/bin/env
-
-# Install dependencies strictly according to uv.lock
-RUN $HOME/.local/bin/uv sync --frozen

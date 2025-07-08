@@ -9,83 +9,184 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple
+import warnings
+
+def validate_result_directory(result_dir: str) -> bool:
+    """验证结果目录的完整性"""
+    path = Path(result_dir)
+    if not path.exists():
+        print(f"❌ 目录不存在: {result_dir}")
+        return False
+    
+    # 检查必要文件
+    gpu_info_file = path / 'gpu_info.json'
+    if not gpu_info_file.exists():
+        print(f"❌ 缺少GPU信息文件: {gpu_info_file}")
+        return False
+    
+    # 检查操作结果文件
+    required_ops = ['matmul', 'bmm', 'conv2d', 'argmax', 'topk']
+    missing_files = []
+    
+    for op_name in required_ops:
+        for i in range(10):  # 假设有10次重复
+            if op_name == 'topk':
+                file_path = path / f'{op_name}_{i}.npz'
+            else:
+                file_path = path / f'{op_name}_{i}.npy'
+            
+            if not file_path.exists():
+                missing_files.append(str(file_path))
+    
+    if missing_files:
+        print(f"⚠️ 警告: 缺少部分结果文件: {len(missing_files)} 个文件")
+        if len(missing_files) <= 5:  # 只显示前5个
+            for file in missing_files[:5]:
+                print(f"  - {file}")
+    
+    return True
 
 def load_results(result_dirs: List[str]) -> Dict:
-    """加载多个GPU的结果"""
+    """加载多个GPU的结果，增加错误处理"""
     all_results = {}
 
     for result_dir in result_dirs:
-        path = Path(result_dir)
-        if not path.exists():
-            print(f"Warning: {result_dir} not found")
+        if not validate_result_directory(result_dir):
             continue
+            
+        path = Path(result_dir)
+        
+        try:
+            # 加载GPU信息
+            with open(path / 'gpu_info.json', 'r') as f:
+                gpu_info = json.load(f)
 
-        # 加载GPU信息
-        with open(path / 'gpu_info.json', 'r') as f:
-            gpu_info = json.load(f)
+            device_name = gpu_info['device_name']
 
-        device_name = gpu_info['device_name']
+            # 加载操作结果
+            results = {}
+            for op_name in ['matmul', 'bmm', 'conv2d', 'argmax']:
+                op_results = []
+                for i in range(10):  # 假设有10次重复
+                    file_path = path / f'{op_name}_{i}.npy'
+                    if file_path.exists():
+                        try:
+                            data = np.load(file_path)
+                            # 验证数据完整性
+                            if data.size == 0:
+                                print(f"⚠️ 警告: 空数据文件 {file_path}")
+                                continue
+                            if np.any(np.isnan(data)) or np.any(np.isinf(data)):
+                                print(f"⚠️ 警告: 检测到NaN或Inf值在 {file_path}")
+                            op_results.append(data)
+                        except Exception as e:
+                            print(f"❌ 加载文件失败 {file_path}: {e}")
+                            continue
+                            
+                if op_results:
+                    results[op_name] = op_results
+                else:
+                    print(f"⚠️ 警告: 没有找到 {op_name} 的有效结果")
 
-        # 加载操作结果
-        results = {}
-        for op_name in ['matmul', 'bmm', 'conv2d', 'argmax']:
-            op_results = []
-            for i in range(10):  # 假设有10次重复
-                file_path = path / f'{op_name}_{i}.npy'
+            # 特殊处理TopK
+            topk_results = []
+            for i in range(10):
+                file_path = path / f'topk_{i}.npz'
                 if file_path.exists():
-                    op_results.append(np.load(file_path))
-            if op_results:
-                results[op_name] = op_results
+                    try:
+                        topk_data = dict(np.load(file_path))
+                        # 验证TopK数据完整性
+                        if 'values' not in topk_data or 'indices' not in topk_data:
+                            print(f"⚠️ 警告: TopK文件格式不正确 {file_path}")
+                            continue
+                        topk_results.append(topk_data)
+                    except Exception as e:
+                        print(f"❌ 加载TopK文件失败 {file_path}: {e}")
+                        continue
+                        
+            if topk_results:
+                results['topk'] = topk_results
 
-        # 特殊处理TopK
-        topk_results = []
-        for i in range(10):
-            file_path = path / f'topk_{i}.npz'
-            if file_path.exists():
-                topk_results.append(dict(np.load(file_path)))
-        if topk_results:
-            results['topk'] = topk_results
-
-        all_results[device_name] = {
-            'gpu_info': gpu_info,
-            'results': results
-        }
+            all_results[device_name] = {
+                'gpu_info': gpu_info,
+                'results': results
+            }
+            
+            print(f"✅ 成功加载 {device_name} 的结果 ({len(results)} 个操作)")
+            
+        except Exception as e:
+            print(f"❌ 加载结果目录 {result_dir} 时发生错误: {e}")
+            continue
 
     return all_results
 
-def compare_arrays(arr1: np.ndarray, arr2: np.ndarray, name: str) -> Dict:
-    """比较两个数组的差异"""
-    if arr1.shape != arr2.shape:
-        return {
-            'error': f"Shape mismatch: {arr1.shape} vs {arr2.shape}",
-            'max_abs_diff': float('inf')
-        }
+def compare_arrays(arr1: np.ndarray, arr2: np.ndarray, name: str, tolerance: float = 1e-6) -> Dict:
+    """比较两个数组的差异，增加容错处理"""
+    try:
+        if arr1.shape != arr2.shape:
+            return {
+                'error': f"形状不匹配: {arr1.shape} vs {arr2.shape}",
+                'max_abs_diff': float('inf'),
+                'comparison_failed': True
+            }
 
-    # 基本统计
-    abs_diff = np.abs(arr1 - arr2)
-    max_abs_diff = np.max(abs_diff)
-    mean_abs_diff = np.mean(abs_diff)
+        # 检查数据类型兼容性
+        if arr1.dtype != arr2.dtype:
+            print(f"⚠️ 警告: 数据类型不匹配 {name}: {arr1.dtype} vs {arr2.dtype}")
+            # 转换为公共类型
+            common_dtype = np.result_type(arr1.dtype, arr2.dtype)
+            arr1 = arr1.astype(common_dtype)
+            arr2 = arr2.astype(common_dtype)
 
-    # ULP差异 (仅适用于相同dtype)
-    if arr1.dtype == arr2.dtype and np.issubdtype(arr1.dtype, np.floating):
-        # 计算ULP差异的简化版本
-        ulp_diff = abs_diff / np.finfo(arr1.dtype).eps
-        max_ulp_diff = np.max(ulp_diff)
-    else:
+        # 基本统计
+        abs_diff = np.abs(arr1 - arr2)
+        max_abs_diff = np.max(abs_diff)
+        mean_abs_diff = np.mean(abs_diff)
+        
+        # 相对误差
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rel_diff = abs_diff / (np.abs(arr1) + 1e-8)  # 避免除零
+            max_rel_diff = np.max(rel_diff)
+
+        # ULP差异 (仅适用于浮点数)
         max_ulp_diff = None
+        if np.issubdtype(arr1.dtype, np.floating):
+            try:
+                # 计算ULP差异的简化版本
+                ulp_diff = abs_diff / np.finfo(arr1.dtype).eps
+                max_ulp_diff = np.max(ulp_diff)
+            except:
+                pass
 
-    # 不同元素百分比
-    different_elements = np.sum(arr1 != arr2)
-    different_percentage = different_elements / arr1.size * 100
+        # 不同元素统计
+        tolerance_mask = abs_diff > tolerance
+        different_elements = np.sum(tolerance_mask)
+        different_percentage = different_elements / arr1.size * 100
 
-    return {
-        'max_abs_diff': float(max_abs_diff),
-        'mean_abs_diff': float(mean_abs_diff),
-        'max_ulp_diff': float(max_ulp_diff) if max_ulp_diff is not None else None,
-        'different_elements': int(different_elements),
-        'different_percentage': float(different_percentage),
-        'total_elements': int(arr1.size)
-    }
+        # 确定性评估
+        is_identical = max_abs_diff == 0
+        is_within_tolerance = max_abs_diff <= tolerance
+
+        return {
+            'max_abs_diff': float(max_abs_diff),
+            'mean_abs_diff': float(mean_abs_diff),
+            'max_rel_diff': float(max_rel_diff),
+            'max_ulp_diff': float(max_ulp_diff) if max_ulp_diff is not None else None,
+            'different_elements': int(different_elements),
+            'different_percentage': float(different_percentage),
+            'total_elements': int(arr1.size),
+            'is_identical': bool(is_identical),
+            'is_within_tolerance': bool(is_within_tolerance),
+            'tolerance_used': float(tolerance),
+            'comparison_failed': False
+        }
+        
+    except Exception as e:
+        return {
+            'error': f"比较过程中发生错误: {str(e)}",
+            'comparison_failed': True
+        }
 
 def analyze_consistency(all_results: Dict) -> Dict:
     """分析跨架构一致性"""
