@@ -1,23 +1,27 @@
-# GPU架构间确定性验证报告
+# GPU Architecture Cross-Determinism Verification Report
 
-生成时间: 2025-07-08T13:08:29
+Generated Time: 2025-07-08T13:08:29
 
-## 参与测试的GPU设备
+## Tested GPU Devices
 
-| 设备名称 | 计算能力 | PyTorch版本 | CUDA版本 |
-|----------|----------|-------------|----------|
+| Device Name | Compute Capability | PyTorch Version | CUDA Version |
+|-------------|-------------------|-----------------|--------------|
 | NVIDIA GeForce RTX 4090 | [8, 9] | 2.6.0+cu124 | 12.4 |
 | NVIDIA H100 PCIe | [9, 0] | 2.6.0+cu124 | 12.4 |
 
-## 跨架构差异分析
+## Cross-Architecture Difference Analysis
 
-### NVIDIA GeForce RTX 4090_vs_NVIDIA H100 PCIe
+### NVIDIA GeForce RTX 4090 vs NVIDIA H100 PCIe
 
-| 操作 | 最大绝对差异 | 平均绝对差异 | 不同元素百分比 |
-|------|--------------|--------------|----------------|
-| matmul | 2.10e+02 | 3.53e+01 | 99.99% |
-| bmm | 1.17e+02 | 1.64e+01 | 90.62% |
-| conv2d | 1.98e+02 | 2.70e+01 | 99.99% |
-| argmax | 9.36e+02 | 2.83e+02 | 80.20% |
-| topk | 0.00e+00 | 0.00e+00 | 0.00% |
+| Operation | Max Absolute Difference | Average Absolute Difference | Different Elements (%) |
+|-----------|------------------------|------------------------------|----------------------|
+| matmul    | 2.10e+02              | 3.53e+01                    | 99.99%               |
+| bmm       | 1.17e+02              | 1.64e+01                    | 90.62%               |
+| conv2d    | 1.98e+02              | 2.70e+01                    | 99.99%               |
+| argmax    | 9.36e+02              | 2.83e+02                    | 80.20%               |
+| topk      | 0.00e+00              | 0.00e+00                    | 0.00%                |
+
+## Analysis Summary
+
+The results show significant variations in deterministic behavior between RTX 4090 and H100 architectures. While `topk` operations maintain perfect consistency, matrix operations (matmul, bmm, conv2d) and reduction operations (argmax) show notable differences, indicating potential non-deterministic behaviors across different GPU architectures.
 

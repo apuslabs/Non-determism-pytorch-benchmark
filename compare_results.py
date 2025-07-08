@@ -1,35 +1,52 @@
 #!/usr/bin/env python3
 """
-跨架构结果对比脚本
-文件名: compare_results.py
+Cross-Architecture Result Comparison Script
+
+This script analyzes and compares PyTorch operation results across different GPU 
+architectures to identify deterministic behavior differences. It provides comprehensive
+statistical analysis and generates detailed comparison reports.
 """
 
-import numpy as np
 import json
-from pathlib import Path
-import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple
+import sys
 import warnings
+from pathlib import Path
+from typing import Dict, List, Tuple, Any, Optional
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Analysis constants
+DEFAULT_TOLERANCE = 1e-6
+REQUIRED_OPERATIONS = ['matmul', 'bmm', 'conv2d', 'argmax', 'topk']
+DEFAULT_REPEAT_COUNT = 10
+
 
 def validate_result_directory(result_dir: str) -> bool:
-    """验证结果目录的完整性"""
+    """Validate the integrity of a result directory
+    
+    Args:
+        result_dir: Path to the result directory
+        
+    Returns:
+        True if directory is valid, False otherwise
+    """
     path = Path(result_dir)
     if not path.exists():
-        print(f"❌ 目录不存在: {result_dir}")
+        print(f"❌ Directory does not exist: {result_dir}")
         return False
     
-    # 检查必要文件
+    # Check for essential files
     gpu_info_file = path / 'gpu_info.json'
     if not gpu_info_file.exists():
-        print(f"❌ 缺少GPU信息文件: {gpu_info_file}")
+        print(f"❌ Missing GPU info file: {gpu_info_file}")
         return False
     
-    # 检查操作结果文件
-    required_ops = ['matmul', 'bmm', 'conv2d', 'argmax', 'topk']
+    # Check operation result files
     missing_files = []
     
-    for op_name in required_ops:
-        for i in range(10):  # 假设有10次重复
+    for op_name in REQUIRED_OPERATIONS:
+        for i in range(DEFAULT_REPEAT_COUNT):
             if op_name == 'topk':
                 file_path = path / f'{op_name}_{i}.npz'
             else:
@@ -39,15 +56,88 @@ def validate_result_directory(result_dir: str) -> bool:
                 missing_files.append(str(file_path))
     
     if missing_files:
-        print(f"⚠️ 警告: 缺少部分结果文件: {len(missing_files)} 个文件")
-        if len(missing_files) <= 5:  # 只显示前5个
+        print(f"⚠️  Warning: Missing some result files: {len(missing_files)} files")
+        if len(missing_files) <= 5:  # Show only first 5
             for file in missing_files[:5]:
                 print(f"  - {file}")
+                
+        # Allow validation to pass if only some files are missing
+        if len(missing_files) > len(REQUIRED_OPERATIONS) * DEFAULT_REPEAT_COUNT * 0.5:
+            print(f"❌ Too many missing files ({len(missing_files)}), validation failed")
+            return False
     
     return True
 
-def load_results(result_dirs: List[str]) -> Dict:
-    """加载多个GPU的结果，增加错误处理"""
+
+def load_gpu_info(result_dir: Path) -> Optional[Dict[str, Any]]:
+    """Load GPU information from result directory
+    
+    Args:
+        result_dir: Path to result directory
+        
+    Returns:
+        GPU information dictionary or None if failed
+    """
+    try:
+        with open(result_dir / 'gpu_info.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"❌ Failed to load GPU info from {result_dir}: {e}")
+        return None
+
+
+def load_operation_results(result_dir: Path, op_name: str) -> List[np.ndarray]:
+    """Load results for a specific operation
+    
+    Args:
+        result_dir: Path to result directory
+        op_name: Name of the operation
+        
+    Returns:
+        List of numpy arrays containing operation results
+    """
+    results = []
+    
+    for i in range(DEFAULT_REPEAT_COUNT):
+        if op_name == 'topk':
+            file_path = result_dir / f'{op_name}_{i}.npz'
+            if file_path.exists():
+                try:
+                    topk_data = dict(np.load(file_path))
+                    if 'values' not in topk_data or 'indices' not in topk_data:
+                        print(f"⚠️  Warning: Invalid TopK file format {file_path}")
+                        continue
+                    results.append(topk_data)
+                except Exception as e:
+                    print(f"❌ Failed to load TopK file {file_path}: {e}")
+                    continue
+        else:
+            file_path = result_dir / f'{op_name}_{i}.npy'
+            if file_path.exists():
+                try:
+                    data = np.load(file_path)
+                    if data.size == 0:
+                        print(f"⚠️  Warning: Empty data file {file_path}")
+                        continue
+                    if np.any(np.isnan(data)) or np.any(np.isinf(data)):
+                        print(f"⚠️  Warning: NaN or Inf values detected in {file_path}")
+                    results.append(data)
+                except Exception as e:
+                    print(f"❌ Failed to load file {file_path}: {e}")
+                    continue
+    
+    return results
+
+
+def load_results(result_dirs: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Load results from multiple GPU result directories
+    
+    Args:
+        result_dirs: List of result directory paths
+        
+    Returns:
+        Dictionary mapping device names to their results and info
+    """
     all_results = {}
 
     for result_dir in result_dirs:
@@ -56,159 +146,200 @@ def load_results(result_dirs: List[str]) -> Dict:
             
         path = Path(result_dir)
         
-        try:
-            # 加载GPU信息
-            with open(path / 'gpu_info.json', 'r') as f:
-                gpu_info = json.load(f)
-
-            device_name = gpu_info['device_name']
-
-            # 加载操作结果
-            results = {}
-            for op_name in ['matmul', 'bmm', 'conv2d', 'argmax']:
-                op_results = []
-                for i in range(10):  # 假设有10次重复
-                    file_path = path / f'{op_name}_{i}.npy'
-                    if file_path.exists():
-                        try:
-                            data = np.load(file_path)
-                            # 验证数据完整性
-                            if data.size == 0:
-                                print(f"⚠️ 警告: 空数据文件 {file_path}")
-                                continue
-                            if np.any(np.isnan(data)) or np.any(np.isinf(data)):
-                                print(f"⚠️ 警告: 检测到NaN或Inf值在 {file_path}")
-                            op_results.append(data)
-                        except Exception as e:
-                            print(f"❌ 加载文件失败 {file_path}: {e}")
-                            continue
-                            
-                if op_results:
-                    results[op_name] = op_results
-                else:
-                    print(f"⚠️ 警告: 没有找到 {op_name} 的有效结果")
-
-            # 特殊处理TopK
-            topk_results = []
-            for i in range(10):
-                file_path = path / f'topk_{i}.npz'
-                if file_path.exists():
-                    try:
-                        topk_data = dict(np.load(file_path))
-                        # 验证TopK数据完整性
-                        if 'values' not in topk_data or 'indices' not in topk_data:
-                            print(f"⚠️ 警告: TopK文件格式不正确 {file_path}")
-                            continue
-                        topk_results.append(topk_data)
-                    except Exception as e:
-                        print(f"❌ 加载TopK文件失败 {file_path}: {e}")
-                        continue
-                        
-            if topk_results:
-                results['topk'] = topk_results
-
-            all_results[device_name] = {
-                'gpu_info': gpu_info,
-                'results': results
-            }
-            
-            print(f"✅ 成功加载 {device_name} 的结果 ({len(results)} 个操作)")
-            
-        except Exception as e:
-            print(f"❌ 加载结果目录 {result_dir} 时发生错误: {e}")
+        # Load GPU information
+        gpu_info = load_gpu_info(path)
+        if gpu_info is None:
             continue
+            
+        device_name = gpu_info['device_name']
+
+        # Load operation results
+        results = {}
+        for op_name in REQUIRED_OPERATIONS:
+            op_results = load_operation_results(path, op_name)
+            if op_results:
+                results[op_name] = op_results
+            else:
+                print(f"⚠️  Warning: No valid results found for {op_name}")
+
+        all_results[device_name] = {
+            'gpu_info': gpu_info,
+            'results': results
+        }
+        
+        print(f"✅ Successfully loaded results for {device_name} ({len(results)} operations)")
 
     return all_results
 
-def compare_arrays(arr1: np.ndarray, arr2: np.ndarray, name: str, tolerance: float = 1e-6) -> Dict:
-    """比较两个数组的差异，增加容错处理"""
+
+def calculate_array_statistics(arr1: np.ndarray, arr2: np.ndarray) -> Dict[str, float]:
+    """Calculate comprehensive statistics for array comparison
+    
+    Args:
+        arr1: First array
+        arr2: Second array
+        
+    Returns:
+        Dictionary containing various statistical measures
+    """
+    abs_diff = np.abs(arr1 - arr2)
+    
+    stats = {
+        'max_abs_diff': float(np.max(abs_diff)),
+        'mean_abs_diff': float(np.mean(abs_diff)),
+        'std_abs_diff': float(np.std(abs_diff)),
+        'median_abs_diff': float(np.median(abs_diff)),
+    }
+    
+    # Relative error calculation
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        denominator = np.maximum(np.abs(arr1), np.abs(arr2))
+        rel_diff = np.divide(abs_diff, denominator, 
+                           out=np.zeros_like(abs_diff), where=denominator != 0)
+        stats['max_rel_diff'] = float(np.max(rel_diff))
+        stats['mean_rel_diff'] = float(np.mean(rel_diff))
+    
+    # ULP difference for floating point types
+    if np.issubdtype(arr1.dtype, np.floating):
+        try:
+            eps = np.finfo(arr1.dtype).eps
+            ulp_diff = abs_diff / eps
+            stats['max_ulp_diff'] = float(np.max(ulp_diff))
+            stats['mean_ulp_diff'] = float(np.mean(ulp_diff))
+        except:
+            stats['max_ulp_diff'] = None
+            stats['mean_ulp_diff'] = None
+    else:
+        stats['max_ulp_diff'] = None
+        stats['mean_ulp_diff'] = None
+    
+    return stats
+
+
+def compare_arrays(arr1: np.ndarray, arr2: np.ndarray, name: str, 
+                  tolerance: float = DEFAULT_TOLERANCE) -> Dict[str, Any]:
+    """Compare two arrays and analyze their differences
+    
+    Args:
+        arr1: First array to compare
+        arr2: Second array to compare
+        name: Name identifier for the comparison
+        tolerance: Tolerance threshold for difference analysis
+        
+    Returns:
+        Dictionary containing comprehensive comparison results
+    """
     try:
         if arr1.shape != arr2.shape:
             return {
-                'error': f"形状不匹配: {arr1.shape} vs {arr2.shape}",
+                'error': f"Shape mismatch: {arr1.shape} vs {arr2.shape}",
                 'max_abs_diff': float('inf'),
                 'comparison_failed': True
             }
 
-        # 检查数据类型兼容性
+        # Handle data type compatibility
         if arr1.dtype != arr2.dtype:
-            print(f"⚠️ 警告: 数据类型不匹配 {name}: {arr1.dtype} vs {arr2.dtype}")
-            # 转换为公共类型
+            print(f"⚠️  Warning: Data type mismatch for {name}: {arr1.dtype} vs {arr2.dtype}")
             common_dtype = np.result_type(arr1.dtype, arr2.dtype)
             arr1 = arr1.astype(common_dtype)
             arr2 = arr2.astype(common_dtype)
 
-        # 基本统计
-        abs_diff = np.abs(arr1 - arr2)
-        max_abs_diff = np.max(abs_diff)
-        mean_abs_diff = np.mean(abs_diff)
+        # Calculate comprehensive statistics
+        stats = calculate_array_statistics(arr1, arr2)
         
-        # 相对误差
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            rel_diff = abs_diff / (np.abs(arr1) + 1e-8)  # 避免除零
-            max_rel_diff = np.max(rel_diff)
+        # Tolerance-based analysis
+        tolerance_mask = np.abs(arr1 - arr2) > tolerance
+        different_elements = int(np.sum(tolerance_mask))
+        different_percentage = float(different_elements / arr1.size * 100)
 
-        # ULP差异 (仅适用于浮点数)
-        max_ulp_diff = None
-        if np.issubdtype(arr1.dtype, np.floating):
-            try:
-                # 计算ULP差异的简化版本
-                ulp_diff = abs_diff / np.finfo(arr1.dtype).eps
-                max_ulp_diff = np.max(ulp_diff)
-            except:
-                pass
+        # Determinism assessment
+        is_identical = stats['max_abs_diff'] == 0
+        is_within_tolerance = stats['max_abs_diff'] <= tolerance
 
-        # 不同元素统计
-        tolerance_mask = abs_diff > tolerance
-        different_elements = np.sum(tolerance_mask)
-        different_percentage = different_elements / arr1.size * 100
-
-        # 确定性评估
-        is_identical = max_abs_diff == 0
-        is_within_tolerance = max_abs_diff <= tolerance
-
-        return {
-            'max_abs_diff': float(max_abs_diff),
-            'mean_abs_diff': float(mean_abs_diff),
-            'max_rel_diff': float(max_rel_diff),
-            'max_ulp_diff': float(max_ulp_diff) if max_ulp_diff is not None else None,
-            'different_elements': int(different_elements),
-            'different_percentage': float(different_percentage),
+        result = {
+            **stats,
+            'different_elements': different_elements,
+            'different_percentage': different_percentage,
             'total_elements': int(arr1.size),
-            'is_identical': bool(is_identical),
-            'is_within_tolerance': bool(is_within_tolerance),
-            'tolerance_used': float(tolerance),
-            'comparison_failed': False
+            'is_identical': is_identical,
+            'is_within_tolerance': is_within_tolerance,
+            'tolerance_used': tolerance,
+            'comparison_failed': False,
+            'data_type': str(arr1.dtype),
+            'array_shape': arr1.shape
         }
+        
+        return result
         
     except Exception as e:
         return {
-            'error': f"比较过程中发生错误: {str(e)}",
+            'error': f"Comparison error: {str(e)}",
             'comparison_failed': True
         }
 
-def analyze_consistency(all_results: Dict) -> Dict:
-    """分析跨架构一致性"""
+
+def compare_topk_results(topk1: Dict[str, np.ndarray], topk2: Dict[str, np.ndarray], 
+                        name: str) -> Dict[str, Any]:
+    """Compare TopK results (values and indices)
+    
+    Args:
+        topk1: First TopK result dictionary
+        topk2: Second TopK result dictionary
+        name: Name identifier for the comparison
+        
+    Returns:
+        Dictionary containing TopK comparison results
+    """
+    try:
+        indices_comp = compare_arrays(topk1['indices'], topk2['indices'], f"{name}_indices")
+        values_comp = compare_arrays(topk1['values'], topk2['values'], f"{name}_values")
+        
+        return {
+            'indices_comparison': indices_comp,
+            'values_comparison': values_comp,
+            'indices_identical': indices_comp['is_identical'],
+            'values_identical': values_comp['is_identical'],
+            'comparison_failed': indices_comp['comparison_failed'] or values_comp['comparison_failed']
+        }
+    except Exception as e:
+        return {
+            'error': f"TopK comparison error: {str(e)}",
+            'comparison_failed': True
+        }
+
+
+def analyze_consistency(all_results: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Analyze cross-architecture consistency
+    
+    Args:
+        all_results: Dictionary containing results from all devices
+        
+    Returns:
+        Dictionary containing pairwise comparison analysis
+    """
     device_names = list(all_results.keys())
     analysis = {}
 
     if len(device_names) < 2:
-        print("Need at least 2 GPU results for comparison")
+        print("❌ Need at least 2 GPU results for comparison")
         return analysis
 
-    # 逐对比较
+    print(f"\n🔍 Analyzing consistency across {len(device_names)} devices")
+    print("=" * 80)
+
+    # Pairwise comparisons
     for i in range(len(device_names)):
         for j in range(i + 1, len(device_names)):
             device1, device2 = device_names[i], device_names[j]
             comparison_key = f"{device1}_vs_{device2}"
 
-            print(f"\\n🔍 Comparing {device1} vs {device2}")
-            print("=" * 60)
+            print(f"\n📊 Comparing {device1} vs {device2}")
+            print("-" * 60)
 
             comparison_results = {}
 
-            # 比较每个操作
+            # Compare standard operations
             for op_name in ['matmul', 'bmm', 'conv2d', 'argmax']:
                 if (op_name in all_results[device1]['results'] and
                     op_name in all_results[device2]['results']):
@@ -227,14 +358,15 @@ def analyze_consistency(all_results: Dict) -> Dict:
 
                     comparison_results[op_name] = op_comparisons
 
-                    # 打印摘要
-                    max_diff = max(comp['max_abs_diff'] for comp in op_comparisons)
-                    avg_different_pct = np.mean([comp['different_percentage'] for comp in op_comparisons])
+                    # Print summary
+                    if op_comparisons:
+                        max_diff = max(comp.get('max_abs_diff', 0) for comp in op_comparisons if not comp.get('comparison_failed', False))
+                        avg_different_pct = np.mean([comp.get('different_percentage', 0) for comp in op_comparisons if not comp.get('comparison_failed', False)])
 
-                    status = "🟢 IDENTICAL" if max_diff == 0 else "🔴 DIFFERENT"
-                    print(f"{op_name:12} | {status:12} | Max Diff: {max_diff:.2e} | Diff %: {avg_different_pct:.2f}%")
+                        status = "🟢 IDENTICAL" if max_diff == 0 else "🔴 DIFFERENT"
+                        print(f"{op_name:12} | {status:12} | Max Diff: {max_diff:.2e} | Diff %: {avg_different_pct:.2f}%")
 
-            # 特殊处理TopK
+            # Handle TopK comparisons
             if ('topk' in all_results[device1]['results'] and
                 'topk' in all_results[device2]['results']):
 
@@ -243,80 +375,168 @@ def analyze_consistency(all_results: Dict) -> Dict:
 
                 topk_comparisons = []
                 for rep_idx in range(min(len(topk1), len(topk2))):
-                    # 比较indices（更敏感）
-                    indices_comp = compare_arrays(
-                        topk1[rep_idx]['indices'],
-                        topk2[rep_idx]['indices'],
-                        f"topk_indices_rep_{rep_idx}"
+                    comp = compare_topk_results(
+                        topk1[rep_idx],
+                        topk2[rep_idx],
+                        f"topk_rep_{rep_idx}"
                     )
-                    topk_comparisons.append(indices_comp)
+                    topk_comparisons.append(comp)
 
                 comparison_results['topk'] = topk_comparisons
 
-                max_diff = max(comp['different_percentage'] for comp in topk_comparisons)
-                print(f"{'topk':12} | {'🔴 DIFFERENT' if max_diff > 0 else '🟢 IDENTICAL':12} | Indices Diff %: {max_diff:.2f}%")
+                if topk_comparisons:
+                    indices_identical = all(comp.get('indices_identical', False) for comp in topk_comparisons if not comp.get('comparison_failed', False))
+                    status = "🟢 IDENTICAL" if indices_identical else "🔴 DIFFERENT"
+                    print(f"{'topk':12} | {status:12} | Indices comparison")
 
             analysis[comparison_key] = comparison_results
 
     return analysis
 
-def generate_report(all_results: Dict, analysis: Dict, output_file: str = "comparison_report.md"):
-    """生成详细的比较报告"""
-    with open(output_file, 'w') as f:
-        f.write("# GPU架构间确定性验证报告\\n\\n")
-        f.write(f"生成时间: {np.datetime64('now')}\\n\\n")
 
-        # GPU信息表格
-        f.write("## 参与测试的GPU设备\\n\\n")
-        f.write("| 设备名称 | 计算能力 | PyTorch版本 | CUDA版本 |\\n")
-        f.write("|----------|----------|-------------|----------|\\n")
+def generate_summary_statistics(analysis: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Generate summary statistics from the analysis
+    
+    Args:
+        analysis: Analysis results from analyze_consistency
+        
+    Returns:
+        Dictionary containing summary statistics
+    """
+    summary = {
+        'total_comparisons': len(analysis),
+        'operations_analyzed': set(),
+        'perfect_matches': 0,
+        'significant_differences': 0,
+    }
+    
+    for comparison_key, comp_results in analysis.items():
+        for op_name, op_comps in comp_results.items():
+            summary['operations_analyzed'].add(op_name)
+            
+            if op_name == 'topk':
+                # Handle TopK differently
+                perfect_match = all(comp.get('indices_identical', False) and comp.get('values_identical', False) 
+                                  for comp in op_comps if not comp.get('comparison_failed', False))
+            else:
+                perfect_match = all(comp.get('is_identical', False) 
+                                  for comp in op_comps if not comp.get('comparison_failed', False))
+            
+            if perfect_match:
+                summary['perfect_matches'] += 1
+            else:
+                # Check for significant differences
+                if op_name != 'topk':
+                    max_diff_pct = max(comp.get('different_percentage', 0) 
+                                     for comp in op_comps if not comp.get('comparison_failed', False))
+                    if max_diff_pct > 10.0:  # More than 10% different
+                        summary['significant_differences'] += 1
+    
+    summary['operations_analyzed'] = list(summary['operations_analyzed'])
+    return summary
+
+
+def generate_report(all_results: Dict[str, Dict[str, Any]], analysis: Dict[str, Dict[str, Any]], 
+                   output_file: str = "comparison_report.md") -> None:
+    """Generate a detailed comparison report
+    
+    Args:
+        all_results: Results from all devices
+        analysis: Analysis results
+        output_file: Output file path for the report
+    """
+    summary = generate_summary_statistics(analysis)
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write("# GPU Architecture Cross-Determinism Verification Report\n\n")
+        f.write(f"Generated Time: {np.datetime64('now')}\n\n")
+
+        # GPU information table
+        f.write("## Tested GPU Devices\n\n")
+        f.write("| Device Name | Compute Capability | PyTorch Version | CUDA Version |\n")
+        f.write("|-------------|-------------------|-----------------|--------------||\n")
 
         for device_name, device_data in all_results.items():
             info = device_data['gpu_info']
-            f.write(f"| {device_name} | {info['compute_capability']} | {info['pytorch_version']} | {info['cuda_version']} |\\n")
+            f.write(f"| {device_name} | {info['compute_capability']} | {info['pytorch_version']} | {info['cuda_version']} |\n")
 
-        # 差异分析
-        f.write("\\n## 跨架构差异分析\\n\\n")
+        # Summary statistics
+        f.write(f"\n## Analysis Summary\n\n")
+        f.write(f"- **Total Comparisons**: {summary['total_comparisons']}\n")
+        f.write(f"- **Operations Analyzed**: {', '.join(summary['operations_analyzed'])}\n")
+        f.write(f"- **Perfect Matches**: {summary['perfect_matches']}\n")
+        f.write(f"- **Significant Differences**: {summary['significant_differences']}\n\n")
+
+        # Detailed difference analysis
+        f.write("## Cross-Architecture Difference Analysis\n\n")
 
         for comparison_key, comp_results in analysis.items():
-            f.write(f"### {comparison_key}\\n\\n")
-            f.write("| 操作 | 最大绝对差异 | 平均绝对差异 | 不同元素百分比 |\\n")
-            f.write("|------|--------------|--------------|----------------|\\n")
+            f.write(f"### {comparison_key}\n\n")
+            f.write("| Operation | Max Absolute Difference | Average Absolute Difference | Different Elements (%) |\n")
+            f.write("|-----------|------------------------|------------------------------|----------------------|\n")
 
             for op_name, op_comps in comp_results.items():
-                max_abs_diff = max(comp['max_abs_diff'] for comp in op_comps)
-                avg_abs_diff = np.mean([comp['mean_abs_diff'] for comp in op_comps])
-                avg_diff_pct = np.mean([comp['different_percentage'] for comp in op_comps])
+                if op_name == 'topk':
+                    # Special handling for TopK
+                    indices_identical = all(comp.get('indices_identical', False) for comp in op_comps if not comp.get('comparison_failed', False))
+                    status = "0.00e+00" if indices_identical else "DIFFERENT"
+                    f.write(f"| {op_name} | {status} | {status} | {'0.00%' if indices_identical else 'Variable'} |\n")
+                else:
+                    valid_comps = [comp for comp in op_comps if not comp.get('comparison_failed', False)]
+                    if valid_comps:
+                        max_abs_diff = max(comp.get('max_abs_diff', 0) for comp in valid_comps)
+                        avg_abs_diff = np.mean([comp.get('mean_abs_diff', 0) for comp in valid_comps])
+                        avg_diff_pct = np.mean([comp.get('different_percentage', 0) for comp in valid_comps])
 
-                f.write(f"| {op_name} | {max_abs_diff:.2e} | {avg_abs_diff:.2e} | {avg_diff_pct:.2f}% |\\n")
+                        f.write(f"| {op_name} | {max_abs_diff:.2e} | {avg_abs_diff:.2e} | {avg_diff_pct:.2f}% |\n")
 
-            f.write("\\n")
+            f.write("\n")
 
-    print(f"📄 详细报告已保存至: {output_file}")
+        # Interpretation guide
+        f.write("## Interpretation Guide\n\n")
+        f.write("**Acceptable Differences:**\n")
+        f.write("- Small floating-point precision differences (< 1e-6 for float32, < 1e-3 for float16)\n")
+        f.write("- Consistent patterns across multiple runs\n\n")
+        f.write("**Concerning Differences:**\n")
+        f.write("- Large magnitude differences (> 1% of typical values)\n")
+        f.write("- Inconsistent patterns between runs\n")
+        f.write("- High percentage of differing elements (> 10%)\n\n")
 
-def main():
-    import sys
+    print(f"📄 Detailed report saved to: {output_file}")
 
+
+def main() -> None:
+    """Main execution function for result comparison"""
     if len(sys.argv) < 3:
         print("Usage: python compare_results.py <result_dir1> <result_dir2> [result_dir3...]")
+        print("\nExample:")
+        print("  python compare_results.py results/results_RTX_4090_20250108_120000 results/results_H100_20250108_120100")
         sys.exit(1)
 
     result_dirs = sys.argv[1:]
+
+    print("🚀 Starting GPU Cross-Architecture Result Comparison")
+    print("=" * 60)
 
     print("🔄 Loading results...")
     all_results = load_results(result_dirs)
 
     if len(all_results) < 2:
-        print("❌ Need at least 2 valid result directories")
+        print("❌ Need at least 2 valid result directories for comparison")
         sys.exit(1)
 
-    print("🔍 Analyzing consistency...")
+    print(f"✅ Loaded results from {len(all_results)} devices")
+
+    print("\n🔍 Analyzing consistency...")
     analysis = analyze_consistency(all_results)
 
-    print("📄 Generating report...")
+    print("\n📄 Generating report...")
     generate_report(all_results, analysis)
 
-    print("\\n✅ Analysis complete!")
+    print("\n" + "=" * 60)
+    print("✅ Analysis completed successfully!")
+    print("📊 Check 'comparison_report.md' for detailed results")
+
 
 if __name__ == "__main__":
     main()
