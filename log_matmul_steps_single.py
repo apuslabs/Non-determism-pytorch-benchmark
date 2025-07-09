@@ -1,4 +1,6 @@
 import torch
+import numpy as np
+import random
 import os
 from datetime import datetime
 
@@ -25,6 +27,11 @@ def log_matmul_steps(seed=42, size=1024, dtype=torch.float16, log_file=LOG_FILE)
     # Set seed for reproducibility on the same GPU
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
 
     # Create matrices directly on the GPU
     matrix_a = torch.randn(size, size, device=device, dtype=dtype)
