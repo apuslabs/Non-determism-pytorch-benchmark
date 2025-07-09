@@ -118,13 +118,13 @@ results/
 Run the benchmark on each GPU architecture you want to compare:
 
 ```bash
-sudo docker run --rm --gpus all -v $(pwd):/workspace -w /workspace pytorch-determism python3 main.py
+sudo docker run --rm --gpus all -v $(pwd):/workspace -w /workspace pytorch-benchmark python3 main.py
 ```
 
 ### 2. Analysis Script
 
 ```python
-sudo docker run --rm --gpus all -v $(pwd):/workspace -w /workspace pytorch-determism python3 compare_results.py results/
+sudo docker run --rm --gpus all -v $(pwd):/workspace -w /workspace pytorch-benchmark python3 compare_results.py results/
 results_NVIDIA_GeForce_RTX_4090_20250708_124452 results/results_NVIDIA_H100_PCIe_20250708_122219
 ```
 
