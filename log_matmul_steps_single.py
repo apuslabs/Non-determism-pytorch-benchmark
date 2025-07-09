@@ -33,9 +33,15 @@ def log_matmul_steps(seed=42, size=1024, dtype=torch.float16, log_file=LOG_FILE)
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
 
-    # Create matrices directly on the GPU
-    matrix_a = torch.randn(size, size, device=device, dtype=dtype)
-    matrix_b = torch.randn(size, size, device=device, dtype=dtype)
+    # Create matrices on the CPU first to ensure identical initial data
+    print("Generating initial random matrices on CPU...")
+    matrix_a_cpu = torch.randn(size, size, dtype=dtype)
+    matrix_b_cpu = torch.randn(size, size, dtype=dtype)
+
+    # Move the identical matrices to the GPU for computation
+    print(f"Moving matrices to device '{device}'...")
+    matrix_a = matrix_a_cpu.to(device)
+    matrix_b = matrix_b_cpu.to(device)
 
     # We will calculate the element at [0, 0] of the result matrix
     row_idx, col_idx = 0, 0
